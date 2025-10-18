@@ -41,40 +41,51 @@
 
 int main(int argc, char* argv[])
 {
-    Options opts = { .m = 10,
-                     .n = 10,
-                     .k = 10,
-                     .mbA = 2,
-                     .nbA = 2,
-                     .mbB = 2,
-                     .nbB = 2,
-                     .mbC = 2,
-                     .nbC = 2,
-                     .ia = 3,
-                     .ja = 3,
-                     .ib = 3,
+    using input_t = double;
+    using output_t = double;
+    using compute_t = double;
+    const cudaDataType_t cuda_input_type = CUDA_R_64F;
+    const cudaDataType_t cuda_output_type = CUDA_R_64F;
+    const cublasComputeType_t cublas_compute_type = CUBLAS_COMPUTE_64F;
+
+    Options opts = { .m = 32768,
+                     .n = 32768,
+                     .k = 32768,
+                     .mbA = 16384,
+                     .nbA = 16384,
+                     .mbB = 16384,
+                     .nbB = 16384,
+                     .mbC = 16384,
+                     .nbC = 16384,
+                     .ia = 1,
+                     .ja = 1,
+                     .ib = 1,
                      .jb = 1,
                      .ic = 1,
                      .jc = 1,
-                     .p = 2,
-                     .q = 1,
+                     .p = 4,
+                     .q = 2,
                      .grid_layout = 'c',
                      .verbose = false };
 
     opts.parse(argc, argv);
     opts.validate();
-    opts.print();
 
     MPI_Init(nullptr, nullptr);
 
+    const int64_t m = opts.m;
     const int64_t n = opts.n;
     const int64_t k = opts.k;
     const int64_t ia = opts.ia;
     const int64_t ja = opts.ja;
+    const int64_t ib = opts.ib;
+    const int64_t jb = opts.jb;
     const int64_t ic = opts.ic;
     const int64_t jc = opts.jc;
     const int64_t mbA = opts.mbA;
     const int64_t nbA = opts.nbA;
+    const int64_t mbB = opts.mbB;
+    const int64_t nbB = opts.nbB;
     const int64_t mbC = opts.mbC;
     const int64_t nbC = opts.nbC;
 
@@ -84,9 +95,14 @@ int main(int argc, char* argv[])
     int rank, nranks;
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    
+    if(rank == 0) {
+      opts.print();
+    }
 
     const int myprow = (opts.grid_layout == 'c' ? rank % nprow : rank / npcol);
     const int mypcol = (opts.grid_layout == 'c' ? rank / nprow : rank % npcol);
+    // printf("[%d] myprow: %d, mypcol: %d\n", rank, myprow, mypcol);
 
     const int local_device = getLocalDevice();
     CUDA_CHECK(cudaSetDevice(local_device));
@@ -113,41 +129,61 @@ int main(int argc, char* argv[])
     cublasMpGrid_t grid = nullptr;
 
     cublasMpMatrixDescriptor_t descA = nullptr;
+    cublasMpMatrixDescriptor_t descB = nullptr;
     cublasMpMatrixDescriptor_t descC = nullptr;
 
-    double* d_A = nullptr;
-    double* d_C = nullptr;
+    input_t* d_A = nullptr;
+    input_t* d_B = nullptr;
+    output_t* d_C = nullptr;
 
-    double* d_work = nullptr;
+    void* d_work = nullptr;
 
-    double alpha = 1.0;
-    double beta = 1.0;
+    compute_t alpha = 1.0;
+    compute_t beta = 0.0;
 
     size_t workspaceInBytesOnDevice = 0;
     size_t workspaceInBytesOnHost = 0;
 
-    const int64_t global_m_a = (ia - 1) + n;
+    const int64_t global_m_a = (ia - 1) + m;
     const int64_t global_n_a = (ja - 1) + k;
-    const int64_t global_m_c = (ic - 1) + n;
+    const int64_t global_m_b = (ib - 1) + k;
+    const int64_t global_n_b = (jb - 1) + n;
+    const int64_t global_m_c = (ic - 1) + m;
     const int64_t global_n_c = (jc - 1) + n;
 
     const int64_t llda = cublasMpNumroc(global_m_a, mbA, myprow, 0, nprow);
     const int64_t loc_n_a = cublasMpNumroc(global_n_a, nbA, mypcol, 0, npcol);
 
+    const int64_t lldb = cublasMpNumroc(global_m_b, mbB, myprow, 0, nprow);
+    const int64_t loc_n_b = cublasMpNumroc(global_n_b, nbB, mypcol, 0, npcol);
+
     const int64_t lldc = cublasMpNumroc(global_m_c, mbC, myprow, 0, nprow);
     const int64_t loc_n_c = cublasMpNumroc(global_n_c, nbC, mypcol, 0, npcol);
 
-    std::vector<double> h_A(llda * loc_n_a, 0);
-    std::vector<double> h_C(lldc * loc_n_c, 0);
+    // printf("[%d] llda: %ld, loc_n_a: %ld, lldb: %ld, loc_n_b: %ld, lldc: %ld, loc_n_c: %ld\n", rank, llda, loc_n_a, lldb, loc_n_b, lldc, loc_n_c);
 
-    generate_random_matrix(n, k, h_A.data(), mbA, nbA, ia, ja, llda, nprow, npcol, myprow, mypcol);
-    generate_random_matrix(n, n, h_C.data(), mbC, nbC, ic, jc, lldc, nprow, npcol, myprow, mypcol);
+    std::vector<input_t> h_A(llda * loc_n_a, 0);
+    std::vector<input_t> h_B(lldb * loc_n_b, 0);
+    std::vector<output_t> h_C(lldc * loc_n_c, 0);
 
-    CUDA_CHECK(cudaMallocAsync(&d_A, llda * loc_n_a * sizeof(double), stream));
-    CUDA_CHECK(cudaMallocAsync(&d_C, lldc * loc_n_c * sizeof(double), stream));
+    generate_random_matrix(m, k, h_A.data(), mbA, nbA, ia, ja, llda, nprow, npcol, myprow, mypcol);
+    generate_random_matrix(k, n, h_B.data(), mbB, nbB, ib, jb, lldb, nprow, npcol, myprow, mypcol);
+    generate_random_matrix(m, n, h_C.data(), mbC, nbC, ic, jc, lldc, nprow, npcol, myprow, mypcol);
 
-    CUDA_CHECK(cudaMemcpyAsync(d_A, h_A.data(), llda * loc_n_a * sizeof(double), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_C, h_C.data(), lldc * loc_n_c * sizeof(double), cudaMemcpyHostToDevice, stream));
+    // printf("h_A:\n");
+    // print_matrix(h_A.data(), llda, llda, loc_n_a);
+    // printf("h_B:\n");
+    // print_matrix(h_B.data(), lldb, llda, loc_n_b);
+    // printf("h_C:\n");
+    // print_matrix(h_C.data(), lldc, lldc, loc_n_c);
+
+    CUDA_CHECK(cudaMallocAsync(&d_A, llda * loc_n_a * sizeof(input_t), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_B, lldb * loc_n_b * sizeof(input_t), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_C, lldc * loc_n_c * sizeof(output_t), stream));
+
+    CUDA_CHECK(cudaMemcpyAsync(d_A, h_A.data(), llda * loc_n_a * sizeof(input_t), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_B, h_B.data(), lldb * loc_n_b * sizeof(input_t), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_C, h_C.data(), lldc * loc_n_c * sizeof(output_t), cudaMemcpyHostToDevice, stream));
 
     CUBLASMP_CHECK(cublasMpGridCreate(
         nprow,
@@ -157,14 +193,17 @@ int main(int argc, char* argv[])
         &grid));
 
     CUBLASMP_CHECK(
-        cublasMpMatrixDescriptorCreate(global_m_a, global_n_a, mbA, nbA, 0, 0, llda, CUDA_R_64F, grid, &descA));
+        cublasMpMatrixDescriptorCreate(global_m_a, global_n_a, mbA, nbA, 0, 0, llda, cuda_input_type, grid, &descA));
     CUBLASMP_CHECK(
-        cublasMpMatrixDescriptorCreate(global_m_c, global_n_c, mbC, nbC, 0, 0, lldc, CUDA_R_64F, grid, &descC));
+        cublasMpMatrixDescriptorCreate(global_m_b, global_n_b, mbB, nbB, 0, 0, lldb, cuda_input_type, grid, &descB));
+    CUBLASMP_CHECK(
+        cublasMpMatrixDescriptorCreate(global_m_c, global_n_c, mbC, nbC, 0, 0, lldc, cuda_output_type, grid, &descC));
 
-    CUBLASMP_CHECK(cublasMpSyrk_bufferSize(
+    CUBLASMP_CHECK(cublasMpGemm_bufferSize(
         handle,
-        CUBLAS_FILL_MODE_LOWER,
         CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        m,
         n,
         k,
         &alpha,
@@ -172,12 +211,16 @@ int main(int argc, char* argv[])
         ia,
         ja,
         descA,
+        d_B,
+        ib,
+        jb,
+        descB,
         &beta,
         d_C,
         ic,
         jc,
         descC,
-        CUBLAS_COMPUTE_64F,
+        cublas_compute_type,
         &workspaceInBytesOnDevice,
         &workspaceInBytesOnHost));
 
@@ -185,42 +228,64 @@ int main(int argc, char* argv[])
 
     std::vector<int8_t> h_work(workspaceInBytesOnHost);
 
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    int iter_time = 20;
+    double time = 0.0;
 
-    const double begin = MPI_Wtime();
+    for(int i = 0; i < iter_time; ++i) {
 
-    CUBLASMP_CHECK(cublasMpSyrk(
-        handle,
-        CUBLAS_FILL_MODE_LOWER,
-        CUBLAS_OP_N,
-        n,
-        k,
-        &alpha,
-        d_A,
-        ia,
-        ja,
-        descA,
-        &beta,
-        d_C,
-        ic,
-        jc,
-        descC,
-        CUBLAS_COMPUTE_64F,
-        d_work,
-        workspaceInBytesOnDevice,
-        h_work.data(),
-        workspaceInBytesOnHost));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+        const double begin = MPI_Wtime();
 
-    const double end = MPI_Wtime();
+        CUBLASMP_CHECK(cublasMpGemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            m,
+            n,
+            k,
+            &alpha,
+            d_A,
+            ia,
+            ja,
+            descA,
+            d_B,
+            ib,
+            jb,
+            descB,
+            &beta,
+            d_C,
+            ic,
+            jc,
+            descC,
+            cublas_compute_type,
+            d_work,
+            workspaceInBytesOnDevice,
+            h_work.data(),
+            workspaceInBytesOnHost));
+
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        const double end = MPI_Wtime();
+
+        time += end - begin;
+    }
+
+    time /= iter_time;
+
 
     if (rank == 0)
     {
-        printf("Duration: %lf GFlops: %lf\n", end - begin, (n * n * k * 1e-9) / (end - begin));
+        printf("Duration: %lf GFlops: %lf\n", time, (2 * m * n * k * 1e-9) / time);
     }
 
+    CUDA_CHECK(cudaMemcpyAsync(h_C.data(), d_C, lldc * loc_n_c * sizeof(output_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    // printf("[%d] h_C_final:\n", rank);
+    // print_matrix(h_C.data(), lldc, lldc, loc_n_c);
+
     CUBLASMP_CHECK(cublasMpMatrixDescriptorDestroy(descA));
+    CUBLASMP_CHECK(cublasMpMatrixDescriptorDestroy(descB));
     CUBLASMP_CHECK(cublasMpMatrixDescriptorDestroy(descC));
 
     CUBLASMP_CHECK(cublasMpGridDestroy(grid));
@@ -228,6 +293,7 @@ int main(int argc, char* argv[])
     CUBLASMP_CHECK(cublasMpDestroy(handle));
 
     CUDA_CHECK(cudaFreeAsync(d_A, stream));
+    CUDA_CHECK(cudaFreeAsync(d_B, stream));
     CUDA_CHECK(cudaFreeAsync(d_C, stream));
     CUDA_CHECK(cudaFreeAsync(d_work, stream));
 

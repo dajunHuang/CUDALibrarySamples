@@ -39,38 +39,58 @@
 #include "helpers.h"
 #include "matrix_generator.hxx"
 
+#include <nvtx3/nvToolsExt.h>
+
+const uint32_t colors[] = {0x0000ff00, 0x000000ff, 0x00ffff00, 0x00ff00ff,
+                           0x0000ffff, 0x00ff0000, 0x00ffffff};
+const int num_colors = sizeof(colors) / sizeof(uint32_t);
+
+#define PUSH_RANGE(name, cid)                              \
+    {                                                      \
+        int color_id = cid;                                \
+        color_id = color_id % num_colors;                  \
+        nvtxEventAttributes_t eventAttrib = {0};           \
+        eventAttrib.version = NVTX_VERSION;                \
+        eventAttrib.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;  \
+        eventAttrib.colorType = NVTX_COLOR_ARGB;           \
+        eventAttrib.color = colors[color_id];              \
+        eventAttrib.messageType = NVTX_MESSAGE_TYPE_ASCII; \
+        eventAttrib.message.ascii = name;                  \
+        nvtxRangePushEx(&eventAttrib);                     \
+    }
+#define POP_RANGE nvtxRangePop();
+
 int main(int argc, char* argv[])
 {
     using input_t = __half;
     using output_t = __half;
-    using compute_t = float;
+    using compute_t = __half;
     const cudaDataType_t cuda_input_type = CUDA_R_16F;
     const cudaDataType_t cuda_output_type = CUDA_R_16F;
-    const cublasComputeType_t cublas_compute_type = CUBLAS_COMPUTE_32F;
+    const cublasComputeType_t cublas_compute_type = CUBLAS_COMPUTE_16F;
 
-    Options opts = { .m = 10,
-                     .n = 10,
-                     .k = 10,
-                     .mbA = 2,
-                     .nbA = 2,
-                     .mbB = 2,
-                     .nbB = 2,
-                     .mbC = 2,
-                     .nbC = 2,
-                     .ia = 3,
-                     .ja = 3,
-                     .ib = 3,
+    Options opts = { .m = 32768,
+                     .n = 32768,
+                     .k = 32768,
+                     .mbA = 16384,
+                     .nbA = 16384,
+                     .mbB = 16384,
+                     .nbB = 16384,
+                     .mbC = 16384,
+                     .nbC = 16384,
+                     .ia = 1,
+                     .ja = 1,
+                     .ib = 1,
                      .jb = 1,
                      .ic = 1,
                      .jc = 1,
-                     .p = 2,
-                     .q = 1,
+                     .p = 4,
+                     .q = 2,
                      .grid_layout = 'c',
                      .verbose = false };
 
     opts.parse(argc, argv);
     opts.validate();
-    opts.print();
 
     MPI_Init(nullptr, nullptr);
 
@@ -96,9 +116,14 @@ int main(int argc, char* argv[])
     int rank, nranks;
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    
+    if(rank == 0) {
+      opts.print();
+    }
 
     const int myprow = (opts.grid_layout == 'c' ? rank % nprow : rank / npcol);
     const int mypcol = (opts.grid_layout == 'c' ? rank / nprow : rank % npcol);
+    // printf("[%d] myprow: %d, mypcol: %d\n", rank, myprow, mypcol);
 
     const int local_device = getLocalDevice();
     CUDA_CHECK(cudaSetDevice(local_device));
@@ -135,7 +160,7 @@ int main(int argc, char* argv[])
     void* d_work = nullptr;
 
     compute_t alpha = 1.0;
-    compute_t beta = 1.0;
+    compute_t beta = 0.0;
 
     size_t workspaceInBytesOnDevice = 0;
     size_t workspaceInBytesOnHost = 0;
@@ -156,6 +181,8 @@ int main(int argc, char* argv[])
     const int64_t lldc = cublasMpNumroc(global_m_c, mbC, myprow, 0, nprow);
     const int64_t loc_n_c = cublasMpNumroc(global_n_c, nbC, mypcol, 0, npcol);
 
+    // printf("[%d] llda: %ld, loc_n_a: %ld, lldb: %ld, loc_n_b: %ld, lldc: %ld, loc_n_c: %ld\n", rank, llda, loc_n_a, lldb, loc_n_b, lldc, loc_n_c);
+
     std::vector<input_t> h_A(llda * loc_n_a, 0);
     std::vector<input_t> h_B(lldb * loc_n_b, 0);
     std::vector<output_t> h_C(lldc * loc_n_c, 0);
@@ -163,6 +190,13 @@ int main(int argc, char* argv[])
     generate_random_matrix(m, k, h_A.data(), mbA, nbA, ia, ja, llda, nprow, npcol, myprow, mypcol);
     generate_random_matrix(k, n, h_B.data(), mbB, nbB, ib, jb, lldb, nprow, npcol, myprow, mypcol);
     generate_random_matrix(m, n, h_C.data(), mbC, nbC, ic, jc, lldc, nprow, npcol, myprow, mypcol);
+
+    // printf("h_A:\n");
+    // print_matrix(h_A.data(), llda, llda, loc_n_a);
+    // printf("h_B:\n");
+    // print_matrix(h_B.data(), lldb, llda, loc_n_b);
+    // printf("h_C:\n");
+    // print_matrix(h_C.data(), lldc, lldc, loc_n_c);
 
     CUDA_CHECK(cudaMallocAsync(&d_A, llda * loc_n_a * sizeof(input_t), stream));
     CUDA_CHECK(cudaMallocAsync(&d_B, lldb * loc_n_b * sizeof(input_t), stream));
@@ -215,45 +249,63 @@ int main(int argc, char* argv[])
 
     std::vector<int8_t> h_work(workspaceInBytesOnHost);
 
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    printf("workspaceInBytesOnDevice: %ld, workspaceInBytesOnHost: %ld\n", workspaceInBytesOnDevice, workspaceInBytesOnHost);
 
-    const double begin = MPI_Wtime();
+    int iter_time = 20;
+    double time = 0.0;
 
-    CUBLASMP_CHECK(cublasMpGemm(
-        handle,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        m,
-        n,
-        k,
-        &alpha,
-        d_A,
-        ia,
-        ja,
-        descA,
-        d_B,
-        ib,
-        jb,
-        descB,
-        &beta,
-        d_C,
-        ic,
-        jc,
-        descC,
-        cublas_compute_type,
-        d_work,
-        workspaceInBytesOnDevice,
-        h_work.data(),
-        workspaceInBytesOnHost));
+    PUSH_RANGE("cublasMpGemm", 1);
+    for(int i = 0; i < iter_time; ++i) {
 
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        const double begin = MPI_Wtime();
 
-    const double end = MPI_Wtime();
+        CUBLASMP_CHECK(cublasMpGemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            m,
+            n,
+            k,
+            &alpha,
+            d_A,
+            ia,
+            ja,
+            descA,
+            d_B,
+            ib,
+            jb,
+            descB,
+            &beta,
+            d_C,
+            ic,
+            jc,
+            descC,
+            cublas_compute_type,
+            d_work,
+            workspaceInBytesOnDevice,
+            h_work.data(),
+            workspaceInBytesOnHost));
+
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        const double end = MPI_Wtime();
+        time += end - begin;
+    }
+    POP_RANGE
+
+    time /= iter_time;
+
 
     if (rank == 0)
     {
-        printf("Duration: %lf GFlops: %lf\n", end - begin, (2 * m * n * k * 1e-9) / (end - begin));
+        printf("Duration: %lf GFlops: %lf\n", time, (2 * m * n * k * 1e-9) / time);
     }
+
+    CUDA_CHECK(cudaMemcpyAsync(h_C.data(), d_C, lldc * loc_n_c * sizeof(output_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    // printf("[%d] h_C_final:\n", rank);
+    // print_matrix(h_C.data(), lldc, lldc, loc_n_c);
 
     CUBLASMP_CHECK(cublasMpMatrixDescriptorDestroy(descA));
     CUBLASMP_CHECK(cublasMpMatrixDescriptorDestroy(descB));
