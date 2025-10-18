@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <cuda_fp4.h>
 #include <cuda_fp8.h>
 #include <mpi.h>
 #include <string.h>
@@ -104,6 +103,8 @@ struct CudaTypeTraits;
         static constexpr int typeSize = type_size;                                                                     \
     };
 
+MAKE_TYPE_TRAITS(__nv_fp8_e4m3, CUDA_R_8F_E4M3, 1);
+MAKE_TYPE_TRAITS(__nv_fp8_e5m2, CUDA_R_8F_E5M2, 1);
 MAKE_TYPE_TRAITS(__nv_bfloat16, CUDA_R_16BF, 2);
 MAKE_TYPE_TRAITS(__half, CUDA_R_16F, 2);
 MAKE_TYPE_TRAITS(float, CUDA_R_32F, 4);
