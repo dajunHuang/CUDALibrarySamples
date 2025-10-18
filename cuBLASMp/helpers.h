@@ -104,10 +104,6 @@ struct CudaTypeTraits;
         static constexpr int typeSize = type_size;                                                                     \
     };
 
-MAKE_TYPE_TRAITS(__nv_fp4_e2m1, CUDA_R_4F_E2M1, 1);
-MAKE_TYPE_TRAITS(__nv_fp8_e4m3, CUDA_R_8F_E4M3, 1);
-MAKE_TYPE_TRAITS(__nv_fp8_e5m2, CUDA_R_8F_E5M2, 1);
-MAKE_TYPE_TRAITS(__nv_fp8_e8m0, CUDA_R_8F_UE8M0, 1);
 MAKE_TYPE_TRAITS(__nv_bfloat16, CUDA_R_16BF, 2);
 MAKE_TYPE_TRAITS(__half, CUDA_R_16F, 2);
 MAKE_TYPE_TRAITS(float, CUDA_R_32F, 4);
@@ -116,19 +112,7 @@ MAKE_TYPE_TRAITS(float, CUDA_R_32F, 4);
 
 cudaDataType_t string_to_cuda_data_type(const char* type)
 {
-    if (strcmp(type, "fp4_e2m1") == 0)
-    {
-        return CUDA_R_4F_E2M1;
-    }
-    else if (strcmp(type, "fp8_e4m3") == 0)
-    {
-        return CUDA_R_8F_E4M3;
-    }
-    else if (strcmp(type, "fp8_e5m2") == 0)
-    {
-        return CUDA_R_8F_E5M2;
-    }
-    else if (strcmp(type, "bf16") == 0)
+    if (strcmp(type, "bf16") == 0)
     {
         return CUDA_R_16BF;
     }
@@ -172,10 +156,6 @@ cublasMpMatmulMatrixScale_t string_to_scale_type(const char* scale)
     {
         return CUBLASMP_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
     }
-    else if (strcmp(scale, "vec32_ue8m0") == 0)
-    {
-        return CUBLASMP_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
-    }
     else if (strcmp(scale, "outer_vec_fp32") == 0)
     {
         return CUBLASMP_MATMUL_MATRIX_SCALE_OUTER_VEC_FP32;
@@ -207,8 +187,6 @@ size_t get_scaling_tensor_size(int64_t m, int64_t n, cublasMpMatmulMatrixScale_t
         case CUBLASMP_MATMUL_MATRIX_SCALE_OUTER_VEC_FP32: return n * sizeof(float);
         case CUBLASMP_MATMUL_MATRIX_SCALE_VEC16_UE4M3:
             return roundup(m, 4 * 16) / 16 * roundup(n, 128) * sizeof(__nv_fp8_e4m3);
-        case CUBLASMP_MATMUL_MATRIX_SCALE_VEC32_UE8M0:
-            return roundup(m, 4 * 32) / 32 * roundup(n, 128) * sizeof(__nv_fp8_e8m0);
         case CUBLASMP_MATMUL_MATRIX_SCALE_VEC128_FP32: return roundup((m + 127) / 128, 4) * n * sizeof(float);
         case CUBLASMP_MATMUL_MATRIX_SCALE_BLK128x128_FP32:
             return (roundup((m + 127) / 128, 4) * ((n + 127) / 128)) * sizeof(float);
@@ -249,13 +227,6 @@ void* allocate_and_init_scaling_factors(int64_t m, int64_t n, cublasMpMatmulMatr
         {
             generate_values(
                 rank, reinterpret_cast<__nv_fp8_e4m3*>(d_scale), scale_size / sizeof(__nv_fp8_e4m3), true, 1, 10);
-            break;
-        }
-
-        case CUBLASMP_MATMUL_MATRIX_SCALE_VEC32_UE8M0:
-        {
-            generate_values(
-                rank, reinterpret_cast<__nv_fp8_e8m0*>(d_scale), scale_size / sizeof(__nv_fp8_e8m0), true, 1, 10);
             break;
         }
 

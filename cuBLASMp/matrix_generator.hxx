@@ -182,17 +182,11 @@ static void generate_values(
 {
     switch (type)
     {
-        case CUDA_R_4F_E2M1:
-            generate_values(seed, reinterpret_cast<__nv_fp4_e2m1*>(buffer), size, device_allocation, min, max);
-            break;
         case CUDA_R_8F_E4M3:
             generate_values(seed, reinterpret_cast<__nv_fp8_e4m3*>(buffer), size, device_allocation, min, max);
             break;
         case CUDA_R_8F_E5M2:
             generate_values(seed, reinterpret_cast<__nv_fp8_e5m2*>(buffer), size, device_allocation, min, max);
-            break;
-        case CUDA_R_8F_UE8M0:
-            generate_values(seed, reinterpret_cast<__nv_fp8_e8m0*>(buffer), size, device_allocation, min, max);
             break;
         case CUDA_R_16F:
             generate_values(seed, reinterpret_cast<__half*>(buffer), size, device_allocation, min, max);
